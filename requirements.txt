@@ -1,0 +1,13 @@
+# Security Intelligence Digest - Python Dependencies
+
+# Notion API client
+notion-client==2.2.1
+
+# RSS feed parsing
+feedparser==6.0.11
+
+# HTTP requests
+requests==2.31.0
+
+# Date/time utilities (usually included, but explicit for clarity)
+python-dateutil==2.8.2
