@@ -61,7 +61,7 @@ Provide:
 
 2. **WHY IT MATTERS** - Provide specific, actionable insights for each persona:
 
-**For a Security Engineer (AI security company)**:
+**For a Security Engineer (AI security company or focussed on AI)**:
 - How does this impact AI security products, cloud infrastructure, or security engineering practices?
 - What immediate actions should be taken?
 - What are the technical implications?
