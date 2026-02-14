@@ -7,6 +7,7 @@ Fetches CVEs, security news, and AI regulations, then creates Notion entries wit
 import os
 import sys
 import json
+import yaml
 import hashlib
 import logging
 from datetime import datetime, timedelta
@@ -26,10 +27,25 @@ logger = logging.getLogger(__name__)
 NOTION_API_KEY = os.getenv('NOTION_API_KEY')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-NVD_API_KEY = os.getenv('NVD_API_KEY', '')  # Optional but recommended
+NVD_API_KEY = os.getenv('NVD_API_KEY', '')
 
-# AI Model Configuration
-GROQ_MODEL = "mixtral-8x7b-32768"  # Best for reasoning and summarization
+# Load config.yaml
+try:
+    with open('config.yaml', 'r') as f:
+        CONFIG = yaml.safe_load(f)
+except Exception as e:
+    logger.warning(f"Could not load config.yaml: {e}. Using defaults.")
+    CONFIG = {
+        'ai': {
+            'model': 'llama-3.3-70b-versatile',
+            'fallback_models': ['llama-3.1-70b-versatile', 'mixtral-8x7b-32768'],
+            'temperature': 0.3,
+            'max_tokens': 2000
+        }
+    }
+
+# AI Configuration with fallbacks
+GROQ_MODELS = [CONFIG['ai']['model']] + CONFIG['ai'].get('fallback_models', [])
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # Persona-based prompt for AI summarization
@@ -104,14 +120,13 @@ class SecurityDigestCollector:
         try:
             feed = feedparser.parse(url)
 
-            for entry in feed.entries[:5]:  # Limit to 5 most recent per feed
+            for entry in feed.entries[:5]:
                 published = getattr(entry, 'published_parsed', None)
                 if published:
                     pub_date = datetime(*published[:6])
                 else:
                     pub_date = datetime.now()
 
-                # Only include items from last 24 hours
                 if (datetime.now() - pub_date).days > 1:
                     continue
 
@@ -135,67 +150,6 @@ class SecurityDigestCollector:
         logger.info(f"Fetched {len(items)} new items from {source_name}")
         return items
 
-    def fetch_nvd_cves(self) -> List[Dict]:
-        """Fetch recent CVEs from NVD API (CVSS >= 7.0)"""
-        logger.info("Fetching CVEs from NVD")
-        items = []
-
-        try:
-            # Calculate date range (last 24 hours)
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=1)
-
-            url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-            params = {
-                'pubStartDate': start_date.strftime('%Y-%m-%dT%H:%M:%S.000'),
-                'pubEndDate': end_date.strftime('%Y-%m-%dT%H:%M:%S.000'),
-                'cvssV3Severity': 'HIGH,CRITICAL'
-            }
-
-            headers = {}
-            if NVD_API_KEY:
-                headers['apiKey'] = NVD_API_KEY
-
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-
-            for vuln in data.get('vulnerabilities', [])[:10]:  # Limit to 10 most severe
-                cve = vuln.get('cve', {})
-                cve_id = cve.get('id', '')
-
-                # Extract CVSS score
-                metrics = cve.get('metrics', {})
-                cvss_data = metrics.get('cvssMetricV31', [{}])[0]
-                cvss_score = cvss_data.get('cvssData', {}).get('baseScore', 0)
-
-                # Extract description
-                descriptions = cve.get('descriptions', [])
-                description = next((d['value'] for d in descriptions if d['lang'] == 'en'), '')
-
-                item = {
-                    'title': f"{cve_id}: {description[:80]}...",
-                    'url': f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-                    'content': description,
-                    'published': cve.get('published', datetime.now().isoformat()),
-                    'source': 'NVD',
-                    'category': 'CVE',
-                    'cve_id': cve_id,
-                    'cvss_score': cvss_score,
-                    'severity': '🔴 Critical' if cvss_score >= 9.0 else '🟠 High'
-                }
-
-                item_hash = self.generate_item_hash(cve_id, item['url'])
-                if item_hash not in self.seen_items:
-                    self.seen_items.add(item_hash)
-                    items.append(item)
-
-        except Exception as e:
-            logger.error(f"Error fetching NVD CVEs: {e}")
-
-        logger.info(f"Fetched {len(items)} CVEs from NVD")
-        return items
-
     def fetch_github_advisories(self) -> List[Dict]:
         """Fetch recent security advisories from GitHub"""
         logger.info("Fetching GitHub Security Advisories")
@@ -203,20 +157,13 @@ class SecurityDigestCollector:
 
         try:
             url = "https://api.github.com/advisories"
-            params = {
-                'per_page': 10,
-                'sort': 'published',
-                'direction': 'desc'
-            }
-
+            params = {'per_page': 10, 'sort': 'published', 'direction': 'desc'}
             response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
             advisories = response.json()
 
             for advisory in advisories:
                 published = datetime.fromisoformat(advisory['published_at'].replace('Z', '+00:00'))
-
-                # Only include items from last 24 hours
                 if (datetime.now(published.tzinfo) - published).days > 1:
                     continue
 
@@ -231,8 +178,6 @@ class SecurityDigestCollector:
                     'published': advisory['published_at'],
                     'source': 'GitHub Advisory',
                     'category': 'CVE',
-                    'cve_id': advisory.get('cve_id', ''),
-                    'cvss_score': advisory.get('cvss', {}).get('score', 0),
                     'severity': f"{'🔴 Critical' if severity == 'CRITICAL' else '🟠 High'}"
                 }
 
@@ -248,56 +193,67 @@ class SecurityDigestCollector:
         return items
 
     def generate_ai_summary(self, item: Dict) -> Optional[Dict]:
-        """Generate AI-powered summary using Groq"""
+        """Generate AI-powered summary using Groq with fallback models"""
         logger.info(f"Generating AI summary for: {item['title'][:50]}...")
 
-        try:
-            prompt = SUMMARY_PROMPT_TEMPLATE.format(
-                title=item['title'],
-                source=item['source'],
-                content=item['content'][:2000]  # Limit content length
-            )
+        prompt = SUMMARY_PROMPT_TEMPLATE.format(
+            title=item['title'],
+            source=item['source'],
+            content=item['content'][:2000]
+        )
 
-            payload = {
-                "model": GROQ_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a cybersecurity and AI governance expert. Provide detailed, actionable insights for security professionals, GRC teams, and data privacy officers."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.3,  # Lower temperature for more consistent outputs
-                "max_tokens": 2000
-            }
+        # Try each model in order until one succeeds
+        for model in GROQ_MODELS:
+            try:
+                logger.info(f"Trying model: {model}")
+                
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a cybersecurity and AI governance expert. Provide detailed, actionable insights for security professionals, GRC teams, and data privacy officers."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": CONFIG['ai'].get('temperature', 0.3),
+                    "max_tokens": CONFIG['ai'].get('max_tokens', 2000)
+                }
 
-            response = requests.post(
-                GROQ_API_URL,
-                headers=self.groq_headers,
-                json=payload,
-                timeout=30
-            )
-            response.raise_for_status()
+                response = requests.post(
+                    GROQ_API_URL,
+                    headers=self.groq_headers,
+                    json=payload,
+                    timeout=30
+                )
+                response.raise_for_status()
 
-            result = response.json()
-            content = result['choices'][0]['message']['content']
+                result = response.json()
+                content = result['choices'][0]['message']['content']
 
-            # Parse JSON response
-            # Sometimes the model wraps JSON in markdown code blocks
-            if '```json' in content:
-                content = content.split('```json')[1].split('```')[0].strip()
-            elif '```' in content:
-                content = content.split('```')[1].split('```')[0].strip()
+                # Parse JSON response
+                if '```json' in content:
+                    content = content.split('```json')[1].split('```')[0].strip()
+                elif '```' in content:
+                    content = content.split('```')[1].split('```')[0].strip()
 
-            summary = json.loads(content)
-            return summary
+                summary = json.loads(content)
+                logger.info(f"✅ Successfully generated summary with model: {model}")
+                return summary
 
-        except Exception as e:
-            logger.error(f"Error generating AI summary: {e}")
-            return None
+            except requests.exceptions.HTTPError as e:
+                logger.warning(f"Model {model} failed with HTTP error: {e}. Trying next model...")
+                continue
+            except Exception as e:
+                logger.warning(f"Model {model} failed: {e}. Trying next model...")
+                continue
+
+        # If all models failed
+        logger.error(f"All models failed to generate summary for: {item['title'][:50]}")
+        return None
 
     def create_notion_entry(self, item: Dict, summary: Dict):
         """Create Notion database entry"""
@@ -308,7 +264,6 @@ class SecurityDigestCollector:
         logger.info(f"Creating Notion entry: {item['title'][:50]}...")
 
         try:
-            # Combine persona insights into Why It Matters field
             why_it_matters = ""
             if summary.get('why_it_matters_security'):
                 why_it_matters += f"**For Security Engineers:**\n{summary['why_it_matters_security']}\n\n"
@@ -330,59 +285,38 @@ class SecurityDigestCollector:
                 "Estimated Read Time": {"rich_text": [{"text": {"content": summary.get('estimated_read_time', '3 min')}}]}
             }
 
-            # Add severity if present
             if item.get('severity'):
                 properties["Severity"] = {"select": {"name": item['severity']}}
 
-            # Add CVE ID if present
-            if item.get('cve_id'):
-                properties["CVE ID"] = {"rich_text": [{"text": {"content": item['cve_id']}}]}
-
-            # Add CVSS score if present
-            if item.get('cvss_score'):
-                properties["CVSS Score"] = {"number": item['cvss_score']}
-
-            # Add tags
             if summary.get('tags'):
                 properties["Tags"] = {"multi_select": [{"name": tag} for tag in summary['tags'][:5]]}
 
-            # Add regions
             if summary.get('region'):
                 properties["Region"] = {"multi_select": [{"name": region} for region in summary['region']]}
 
-            # Create page content (What and Why It Matters)
             children = [
                 {
                     "object": "block",
                     "type": "heading_2",
-                    "heading_2": {
-                        "rich_text": [{"type": "text", "text": {"content": "What Happened"}}]
-                    }
+                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": "What Happened"}}]}
                 },
                 {
                     "object": "block",
                     "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": summary.get('what', 'No summary available')}}]
-                    }
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": summary.get('what', 'No summary available')}}]}
                 },
                 {
                     "object": "block",
                     "type": "heading_2",
-                    "heading_2": {
-                        "rich_text": [{"type": "text", "text": {"content": "Why It Matters"}}]
-                    }
+                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Why It Matters"}}]}
                 },
                 {
                     "object": "block",
                     "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": why_it_matters[:2000]}}]  # Notion has limits
-                    }
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": why_it_matters[:2000]}}]}
                 }
             ]
 
-            # Create the page
             self.notion.pages.create(
                 parent={"database_id": NOTION_DATABASE_ID},
                 properties=properties,
@@ -400,35 +334,18 @@ class SecurityDigestCollector:
         logger.info("Starting Security Intelligence Collection")
         logger.info("=" * 50)
 
-        # RSS Feeds Configuration
         rss_feeds = [
-            # Cybersecurity News
             ("https://krebsonsecurity.com/feed/", "News", "Krebs on Security"),
             ("https://www.bleepingcomputer.com/feed/", "News", "BleepingComputer"),
             ("https://feeds.feedburner.com/TheHackersNews", "News", "The Hacker News"),
             ("https://www.darkreading.com/rss.xml", "News", "Dark Reading"),
-
-            # Cloud Security
-            ("https://aws.amazon.com/security/security-bulletins/rss/", "Cloud", "AWS Security"),
             ("https://cloud.google.com/feeds/kubernetes-engine-security-bulletins.xml", "Cloud", "GCP Security"),
-
-            # AI Security & Research
-            ("https://arxiv.org/rss/cs.CR", "AI Security", "arXiv Security"),
-
-            # Exploit & Vulnerability Info
-            ("https://www.exploit-db.com/rss.xml", "CVE", "Exploit-DB"),
         ]
 
-        # Collect from RSS feeds
         for url, category, source_name in rss_feeds:
             items = self.fetch_rss_feed(url, category, source_name)
             self.items.extend(items)
 
-        # Collect CVEs from NVD
-        cve_items = self.fetch_nvd_cves()
-        self.items.extend(cve_items)
-
-        # Collect GitHub advisories
         gh_items = self.fetch_github_advisories()
         self.items.extend(gh_items)
 
@@ -440,17 +357,9 @@ class SecurityDigestCollector:
         """Process items with AI and publish to Notion"""
         logger.info("Processing items with AI summarization...")
 
-        # Sort by severity/importance
-        def sort_key(item):
-            severity_order = {'🔴 Critical': 0, '🟠 High': 1, '🟡 Medium': 2, '🟢 Low': 3}
-            return (severity_order.get(item.get('severity', ''), 4), item.get('published', ''))
-
-        self.items.sort(key=sort_key)
-
-        # Limit to top 10-15 items for daily digest
         items_to_process = self.items[:15]
-
         processed_count = 0
+
         for item in items_to_process:
             summary = self.generate_ai_summary(item)
 
@@ -481,7 +390,6 @@ class SecurityDigestCollector:
 
 
 if __name__ == "__main__":
-    # Validate environment variables
     if not NOTION_API_KEY:
         logger.error("NOTION_API_KEY environment variable not set")
         sys.exit(1)
@@ -494,7 +402,6 @@ if __name__ == "__main__":
         logger.error("GROQ_API_KEY environment variable not set")
         sys.exit(1)
 
-    # Run the collector
     collector = SecurityDigestCollector()
     collector.run()
 

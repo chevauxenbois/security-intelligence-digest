@@ -1,5 +1,18 @@
 # Security Intelligence Digest Configuration
 
+# AI Summarization Configuration (UPDATED FOR FUTURE-PROOFING)
+ai:
+  provider: groq
+  model: llama-3.3-70b-versatile  # Current best model (Feb 2026)
+  temperature: 0.3
+  max_tokens: 2000
+  
+  # Fallback models - will try these in order if primary fails
+  fallback_models:
+    - llama-3.1-70b-versatile      # Fallback 1
+    - llama-3.1-8b-instant         # Fallback 2 (faster)
+    - mixtral-8x7b-32768           # Fallback 3 (older but stable)
+
 # RSS Feeds Configuration
 rss_feeds:
   # Tier 1: Critical Cybersecurity News
@@ -24,108 +37,24 @@ rss_feeds:
     priority: medium
 
   # Cloud Security
-  - url: https://aws.amazon.com/security/security-bulletins/rss/
-    category: Cloud
-    name: AWS Security Bulletins
-    priority: high
-
   - url: https://cloud.google.com/feeds/kubernetes-engine-security-bulletins.xml
     category: Cloud
     name: GCP Kubernetes Security
     priority: high
-
-  - url: https://cloud.google.com/feeds/compute-engine-security-bulletins.xml
-    category: Cloud
-    name: GCP Compute Security
-    priority: medium
-
-  # AI Security & Research
-  - url: https://arxiv.org/rss/cs.CR
-    category: AI Security
-    name: arXiv Computer Security
-    priority: medium
-
-  # Vulnerabilities & Exploits
-  - url: https://www.exploit-db.com/rss.xml
-    category: CVE
-    name: Exploit Database
-    priority: medium
-
-  - url: http://www.kb.cert.org/vulfeed/
-    category: CVE
-    name: CERT Vulnerability Notes
-    priority: high
-
-  # Additional Sources (Optional - uncomment to enable)
-  # - url: https://www.us-cert.gov/ncas/current-activity.xml
-  #   category: News
-  #   name: US-CERT Current Activity
-  #   priority: high
-
-  # - url: https://www.rapid7.com/blog/feed/
-  #   category: News
-  #   name: Rapid7 Blog
-  #   priority: medium
-
-# API Endpoints
-api_endpoints:
-  nvd:
-    enabled: true
-    url: https://services.nvd.nist.gov/rest/json/cves/2.0
-    min_severity: 7.0  # HIGH and CRITICAL only
-    max_items: 10
-
-  github_advisories:
-    enabled: true
-    url: https://api.github.com/advisories
-    severities: [HIGH, CRITICAL]
-    max_items: 10
-
-# AI Summarization Configuration
-ai:
-  provider: groq
-  model: mixtral-8x7b-32768  # Best for reasoning
-  temperature: 0.3
-  max_tokens: 2000
-  fallback_models:
-    - llama-3.1-8b-instant  # Faster fallback
-    - gemma2-9b-it  # Alternative
 
 # Digest Settings
 digest:
   max_items_per_day: 15
   time_range_hours: 24
   deduplication: true
-  sort_by: severity  # severity, date, or source
+  sort_by: severity
 
-# Notion Database Configuration
+# Notion Database Configuration  
 notion:
   default_status: 🆕 New
   ai_summary_quality: ⭐⭐⭐⭐⭐
 
-  # Auto-tagging rules
-  auto_tags:
-    - keyword: AWS
-      tags: [AWS, Cloud]
-    - keyword: Azure
-      tags: [Azure, Cloud, Microsoft]
-    - keyword: GCP
-      tags: [GCP, Cloud, Google]
-    - keyword: India|DPDPA|RBI|SEBI
-      tags: [India, Regulation]
-    - keyword: GDPR|EU AI Act
-      tags: [EU, Regulation]
-    - keyword: LLM|GPT|Claude|Gemini
-      tags: [AI, LLM]
-    - keyword: Kubernetes|K8s|Docker
-      tags: [Cloud, Container]
-
 # Logging
 logging:
-  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  level: INFO
   format: '%(asctime)s - %(levelname)s - %(message)s'
-
-# Schedule (for reference - actual schedule in GitHub Actions)
-schedule:
-  cron: '30 0 * * *'  # 6:00 AM IST (00:30 UTC)
-  timezone: Asia/Kolkata
