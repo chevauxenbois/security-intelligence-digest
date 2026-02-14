@@ -11,3 +11,6 @@ requests==2.31.0
 
 # Date/time utilities (usually included, but explicit for clarity)
 python-dateutil==2.8.2
+
+# YAML config parsing
+pyyaml==6.0.1
